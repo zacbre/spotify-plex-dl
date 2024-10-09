@@ -3,6 +3,7 @@ mod track_album_artist;
 
 use std::collections::{BTreeMap, HashMap};
 
+use clap::{arg, command, Parser};
 use levenshtein::levenshtein;
 use plex::{
     client::Plex,
@@ -33,6 +34,15 @@ fn get_music_provider(providers: &MediaContainerWrapper<ProviderMediaContainer>)
     None
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    playlist_id: String,
+    #[arg(short, long)]
+    playlist_name: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // You can use any logger for debugging.
@@ -44,11 +54,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let spotify_secret_token =
         std::env::var("SPOTIFY_SECRET_TOKEN").expect("SPOTIFY_SECRET_TOKEN not set");
 
+    // use clap to parse command line arguments
+    let args = Args::parse();
+
     let plex = plex::client::Plex::new(plex_url, plex_token);
-    let spotify_tracks = get_spotify_tracks(spotify_client_id, spotify_secret_token).await?;
+    let spotify_tracks =
+        get_spotify_tracks(spotify_client_id, spotify_secret_token, args.playlist_id).await?;
     let plex_tracks = get_plex_tracks(&plex).await?;
 
-    let mut playlist_id = String::default();
+    let mut playlist_id = String::default(); // plex's playlist id
 
     let mut dupe_list: BTreeMap<String, (TrackAlbumArtist, TrackAlbumArtist)> = BTreeMap::new();
 
@@ -67,7 +81,13 @@ async fn main() -> Result<(), anyhow::Error> {
 
         for fun in list_of_fns {
             let result = fun
-                .match_fn(&mut playlist_id, &plex, &plex_tracks, &spotify_track)
+                .match_fn(
+                    &mut playlist_id,
+                    &plex,
+                    &plex_tracks,
+                    &spotify_track,
+                    &args.playlist_name,
+                )
                 .await;
             if result.is_ok() {
                 let track_result = result.unwrap();
@@ -122,6 +142,7 @@ trait Matcher: Send + Sync {
         plex: &Plex,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
+        playlist_name: &String,
     ) -> Result<TrackAlbumArtist, anyhow::Error>;
 }
 
@@ -134,6 +155,7 @@ impl Matcher for MatchForwardBack {
         plex: &Plex,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
+        playlist_name: &String,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
         for plex_track in plex_tracks.iter() {
             if (plex_track.artist.starts_with(&spotify_track.artist)
@@ -141,7 +163,7 @@ impl Matcher for MatchForwardBack {
                 || (spotify_track.artist.starts_with(&plex_track.artist)
                     && spotify_track.track.starts_with(&plex_track.track))
             {
-                playlist(playlist_id, &plex, plex_track).await?;
+                playlist(playlist_id, &plex, plex_track, playlist_name).await?;
                 return Ok(plex_track.clone());
             }
         }
@@ -158,6 +180,7 @@ impl Matcher for LevenshteinDistance {
         plex: &Plex,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
+        playlist_name: &String,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
         let mut sorted: Vec<(usize, TrackAlbumArtist)> = plex_tracks
             .iter()
@@ -184,7 +207,7 @@ impl Matcher for LevenshteinDistance {
                     plex_track.album,
                     plex_track.track
                 );
-                playlist(playlist_id, &plex, plex_track).await?;
+                playlist(playlist_id, &plex, plex_track, playlist_name).await?;
                 return Ok(plex_track.clone());
             }
         };
@@ -202,6 +225,7 @@ impl Matcher for MatchWithCharReplacements {
         plex: &Plex,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
+        playlist_name: &String,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
         let replacements = HashMap::from([
             ("’", "'"),
@@ -231,13 +255,25 @@ impl Matcher for MatchWithCharReplacements {
         }
 
         let result = MatchForwardBack {}
-            .match_fn(playlist_id, plex, &new_plex_tracks, &spotify_track)
+            .match_fn(
+                playlist_id,
+                plex,
+                &new_plex_tracks,
+                &spotify_track,
+                playlist_name,
+            )
             .await;
         if result.is_ok() {
             return result;
         }
         let result = LevenshteinDistance {}
-            .match_fn(playlist_id, plex, &new_plex_tracks, &spotify_track)
+            .match_fn(
+                playlist_id,
+                plex,
+                &new_plex_tracks,
+                &spotify_track,
+                playlist_name,
+            )
             .await;
         if result.is_ok() {
             return result;
@@ -251,12 +287,13 @@ async fn playlist(
     playlist_id: &mut String,
     plex: &Plex,
     plex_track: &TrackAlbumArtist,
+    playlist_name: &String,
 ) -> Result<(), anyhow::Error> {
     if playlist_id.len() <= 0 {
         if let MetadataType::Plex(meta) = &plex_track.metadata {
             let playlist = plex
                 .create_playlist(
-                    &std::env::var("PLAYLIST_NAME").expect("PLAYLIST_NAME not set"),
+                    playlist_name,
                     meta.machine_identifier.as_str(),
                     meta.provider_identifier.as_str(),
                     meta.key.as_str(),
@@ -289,6 +326,7 @@ async fn playlist(
 async fn get_spotify_tracks(
     client_id: String,
     secret_token: String,
+    playlist_id: String,
 ) -> Result<Vec<TrackAlbumArtist>, anyhow::Error> {
     let mut tracks: Vec<TrackAlbumArtist> = Vec::new();
     let creds = Credentials::new(&client_id, &secret_token);
@@ -303,8 +341,6 @@ async fn get_spotify_tracks(
 
     let url = spotify.get_authorize_url(false).unwrap();
     spotify.prompt_for_token(&url)?;
-
-    let playlist_id = std::env::var("PLAYLIST_ID").expect("PLAYLIST_ID not set");
 
     let stream = spotify.playlist_items(PlaylistId::from_id(playlist_id).unwrap(), None, None);
 
