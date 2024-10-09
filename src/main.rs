@@ -13,7 +13,7 @@ use rspotify::{
     prelude::{BaseClient, OAuthClient},
     scopes, AuthCodeSpotify, Credentials, OAuth,
 };
-use track_album_artist::{MetadataType, PlexMetadata, SpotifyMetadata, TrackAlbumArtist};
+use track_album_artist::{Artist, MetadataType, PlexMetadata, SpotifyMetadata, TrackAlbumArtist};
 
 fn get_music_provider(providers: &MediaContainerWrapper<ProviderMediaContainer>) -> Option<String> {
     for provider in providers.media_container.media_provider.iter() {
@@ -33,6 +33,58 @@ fn get_music_provider(providers: &MediaContainerWrapper<ProviderMediaContainer>)
     None
 }
 
+async fn filter_plex_artists(
+    spotify_tracks: &Vec<TrackAlbumArtist>,
+    plex_artists: &Vec<Artist>,
+) -> Result<Vec<Artist>, anyhow::Error> {
+    let mut filtered_artists = Vec::new();
+    let list_of_fns: Vec<Box<dyn Matcher>> = vec![
+        Box::new(MatchForwardBack {}),
+        Box::new(LevenshteinDistance {}),
+        Box::new(MatchWithCharReplacements {}),
+    ];
+
+    // patch spotify tracks to only be artist.
+    let spotify_tracks: Vec<TrackAlbumArtist> = spotify_tracks
+        .iter()
+        .map(|track| TrackAlbumArtist {
+            artist: track.artist.clone(),
+            ..Default::default()
+        })
+        .collect();
+
+    'outer: for artist in plex_artists {
+        for matcher in &list_of_fns {
+            // construct TrackAlbumArtist from Artist
+            let plex_track_album_artist = TrackAlbumArtist {
+                track: "".to_string(),
+                album: "".to_string(),
+                artist: artist.artist.to_lowercase().clone(),
+                metadata: MetadataType::Plex(PlexMetadata {
+                    ..Default::default()
+                }),
+            };
+
+            let result = matcher
+                .match_fn(true, &spotify_tracks, &plex_track_album_artist)
+                .await;
+            if result.is_ok() || artist.artist == "Various Artists" {
+                filtered_artists.push(artist.clone());
+                continue 'outer;
+            }
+        }
+    }
+
+    let artists = filtered_artists
+        .iter()
+        .map(|artist| artist.artist.clone())
+        .collect::<Vec<String>>()
+        .join(", ");
+    println!("Artists: {artists:}");
+
+    Ok(filtered_artists)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // You can use any logger for debugging.
@@ -43,35 +95,46 @@ async fn main() -> Result<(), anyhow::Error> {
     let spotify_client_id = std::env::var("SPOTIFY_CLIENT_ID").expect("SPOTIFY_CLIENT_ID not set");
     let spotify_secret_token =
         std::env::var("SPOTIFY_SECRET_TOKEN").expect("SPOTIFY_SECRET_TOKEN not set");
+    let method = std::env::var("METHOD")
+        .unwrap_or("accuracy".to_string())
+        .to_lowercase();
 
     let plex = plex::client::Plex::new(plex_url, plex_token);
     let spotify_tracks = get_spotify_tracks(spotify_client_id, spotify_secret_token).await?;
-    let plex_tracks = get_plex_tracks(&plex).await?;
+    let plex_artists = get_plex_artists(&plex).await?;
+    // get additional artists here.
+    let mut new_plex_artists = plex_artists.clone();
+    for artist in &plex_artists {
+        let additional_artists = get_compilation_albums(&plex, artist).await?;
+        new_plex_artists.extend(additional_artists);
+    }
+
+    let artists = if method == "speed" {
+        // filter artists by matching name to spotify track artist names.
+        filter_plex_artists(&spotify_tracks, &new_plex_artists).await?
+    } else {
+        new_plex_artists
+    };
+
+    let plex_tracks = get_plex_tracks(&plex, &artists).await?;
 
     let mut playlist_id = String::default();
 
     let mut dupe_list: BTreeMap<String, (TrackAlbumArtist, TrackAlbumArtist)> = BTreeMap::new();
 
-    // try to find a single match?
-    'outer: for spotify_track in spotify_tracks.iter() {
-        // println!(
-        //     "Looking for {} - {}",
-        //     spotify_track.artist, spotify_track.track
-        // );
-        //
-        let list_of_fns: Vec<Box<dyn Matcher>> = vec![
-            Box::new(MatchForwardBack {}),
-            Box::new(LevenshteinDistance {}),
-            Box::new(MatchWithCharReplacements {}),
-        ];
+    let list_of_fns: Vec<Box<dyn Matcher>> = vec![
+        Box::new(MatchForwardBack {}),
+        Box::new(LevenshteinDistance {}),
+        Box::new(MatchWithCharReplacements {}),
+    ];
 
-        for fun in list_of_fns {
-            let result = fun
-                .match_fn(&mut playlist_id, &plex, &plex_tracks, &spotify_track)
-                .await;
+    'outer: for spotify_track in spotify_tracks.iter() {
+        for fun in &list_of_fns {
+            let result = fun.match_fn(false, &plex_tracks, &spotify_track).await;
             if result.is_ok() {
                 let track_result = result.unwrap();
                 if let MetadataType::Plex(meta) = &track_result.metadata {
+                    playlist(&mut playlist_id, &plex, &track_result).await?;
                     if !dupe_list.contains_key(&meta.rating_key) {
                         dupe_list.insert(
                             meta.rating_key.clone(),
@@ -118,8 +181,7 @@ async fn main() -> Result<(), anyhow::Error> {
 trait Matcher: Send + Sync {
     async fn match_fn(
         &self,
-        playlist_id: &mut String,
-        plex: &Plex,
+        artist_only: bool,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
     ) -> Result<TrackAlbumArtist, anyhow::Error>;
@@ -130,8 +192,7 @@ struct MatchForwardBack;
 impl Matcher for MatchForwardBack {
     async fn match_fn(
         &self,
-        playlist_id: &mut String,
-        plex: &Plex,
+        _artist_only: bool,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
@@ -141,7 +202,6 @@ impl Matcher for MatchForwardBack {
                 || (spotify_track.artist.starts_with(&plex_track.artist)
                     && spotify_track.track.starts_with(&plex_track.track))
             {
-                playlist(playlist_id, &plex, plex_track).await?;
                 return Ok(plex_track.clone());
             }
         }
@@ -154,8 +214,7 @@ struct LevenshteinDistance;
 impl Matcher for LevenshteinDistance {
     async fn match_fn(
         &self,
-        playlist_id: &mut String,
-        plex: &Plex,
+        artist_only: bool,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
@@ -171,9 +230,11 @@ impl Matcher for LevenshteinDistance {
 
         sorted.sort_by_key(|(distance, _)| *distance);
 
+        let distance_check = if artist_only { 2 } else { 11 };
+
         // get highest score?
         if let Some((distance, plex_track)) = sorted.get(0) {
-            if *distance < 11 {
+            if *distance < distance_check {
                 println!(
                     "Closest match ({}): {:?} {:?} {:?} => {:?} {:?} {:?}",
                     distance,
@@ -184,7 +245,6 @@ impl Matcher for LevenshteinDistance {
                     plex_track.album,
                     plex_track.track
                 );
-                playlist(playlist_id, &plex, plex_track).await?;
                 return Ok(plex_track.clone());
             }
         };
@@ -198,8 +258,7 @@ struct MatchWithCharReplacements;
 impl Matcher for MatchWithCharReplacements {
     async fn match_fn(
         &self,
-        playlist_id: &mut String,
-        plex: &Plex,
+        artist_only: bool,
         plex_tracks: &Vec<TrackAlbumArtist>,
         spotify_track: &TrackAlbumArtist,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
@@ -231,13 +290,13 @@ impl Matcher for MatchWithCharReplacements {
         }
 
         let result = MatchForwardBack {}
-            .match_fn(playlist_id, plex, &new_plex_tracks, &spotify_track)
+            .match_fn(artist_only, &new_plex_tracks, &spotify_track)
             .await;
         if result.is_ok() {
             return result;
         }
         let result = LevenshteinDistance {}
-            .match_fn(playlist_id, plex, &new_plex_tracks, &spotify_track)
+            .match_fn(artist_only, &new_plex_tracks, &spotify_track)
             .await;
         if result.is_ok() {
             return result;
@@ -347,10 +406,7 @@ async fn get_spotify_tracks(
     Ok(tracks)
 }
 
-async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyhow::Error> {
-    let mut tracks = Vec::new();
-    // access to plex.
-
+async fn get_plex_artists(plex: &Plex) -> Result<Vec<Artist>, anyhow::Error> {
     let providers = plex.get_providers().await?;
 
     // find provider with name "Music"
@@ -366,14 +422,32 @@ async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyhow::E
         artists_final.extend(artists.media_container.metadata.unwrap());
     }
 
-    // get total.
-    //println!("Artists Total: {:?}", artists_final.len());
-    let mut i = 1;
-    for artist in artists_final.iter() {
-        //println!("artist: {:?}", artist.title);
-        // get any additional metadata from artist.
-        let mut metadata: Vec<Metadata> = Vec::new();
-        let extras = plex.get_extras(&artist.rating_key).await?;
+    let artists = artists_final
+        .iter()
+        .map(|m| {
+            let artist = Artist {
+                artist: m.title.clone(),
+                metadata: MetadataType::Plex(PlexMetadata {
+                    rating_key: m.rating_key.clone(),
+                    key: m.key.clone(),
+                    ..Default::default()
+                }),
+            };
+            artist
+        })
+        .collect::<Vec<Artist>>();
+
+    Ok(artists)
+}
+
+async fn get_compilation_albums(
+    plex: &Plex,
+    artist: &Artist,
+) -> Result<Vec<Artist>, anyhow::Error> {
+    let mut artists: Vec<Artist> = Vec::new();
+    let mut metadata: Vec<Metadata> = Vec::new();
+    if let MetadataType::Plex(meta) = &artist.metadata {
+        let extras = plex.get_extras(&meta.rating_key).await?;
         for extra in extras.media_container.hub.iter() {
             if extra.metadata.is_none()
                 || extra.rtype != "album"
@@ -392,20 +466,11 @@ async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyhow::E
                 }
             }
         }
-        let albums = plex.get_metadata_children(&artist.rating_key).await?;
-        if albums.media_container.metadata.is_some() {
-            for album in albums.media_container.metadata.as_ref().unwrap().iter() {
-                metadata.push(album.clone());
-            }
-        }
-
         for meta in metadata {
-            //println!("\talbum: {:?} ({})", meta.title, meta.rating_key);
             let tracks_meta = plex.get_metadata_children(&meta.rating_key).await?;
             if tracks_meta.media_container.metadata.is_none() {
                 continue;
             }
-
             for track in tracks_meta
                 .media_container
                 .metadata
@@ -413,31 +478,94 @@ async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyhow::E
                 .unwrap()
                 .iter()
             {
-                // track album artist.
-                let track_album_artist = TrackAlbumArtist {
-                    track: track.title.to_lowercase().clone(),
-                    album: meta.title.to_lowercase().clone(),
-                    artist: artist.title.to_lowercase(),
-                    metadata: MetadataType::Plex(PlexMetadata {
-                        machine_identifier: providers.media_container.machine_identifier.clone(),
-                        provider_identifier: providers
-                            .media_container
-                            .media_provider
-                            .get(0)
-                            .expect("no media provider found")
-                            .identifier
-                            .clone(),
-                        rating_key: track.rating_key.clone(),
-                        key: track.key.clone(),
-                    }),
-                };
-                tracks.push(track_album_artist);
-                if track.original_title.is_some() {
-                    // there might be an additional artist, so try to match that too?
+                // see if we've already seen this artist, if not then add to artists vec.
+                if track.original_title.is_none() {
+                    continue;
+                }
+                let artist_cloned = track.original_title.as_ref().unwrap().clone();
+                if !artists.iter().any(|a| a.artist == artist_cloned) {
+                    let artist = Artist {
+                        artist: artist_cloned,
+                        metadata: MetadataType::Plex(PlexMetadata {
+                            rating_key: meta.rating_key.clone(),
+                            key: meta.key.clone(),
+                            ..Default::default()
+                        }),
+                    };
+                    artists.push(artist);
+                }
+            }
+        }
+    }
+
+    Ok(artists)
+}
+
+async fn get_plex_tracks(
+    plex: &Plex,
+    artists: &Vec<Artist>,
+) -> Result<Vec<TrackAlbumArtist>, anyhow::Error> {
+    let mut tracks = Vec::new();
+    // access to plex.
+
+    let providers = plex.get_providers().await?;
+
+    // get total.
+    //println!("Artists Total: {:?}", artists_final.len());
+    let mut i = 1;
+    for artist in artists.iter() {
+        if let MetadataType::Plex(artist_metadata) = &artist.metadata {
+            //println!("artist: {:?}", artist.title);
+            // get any additional metadata from artist.
+            let mut metadata: Vec<Metadata> = Vec::new();
+            let extras = plex.get_extras(&artist_metadata.rating_key).await?;
+            for extra in extras.media_container.hub.iter() {
+                if extra.metadata.is_none()
+                    || extra.rtype != "album"
+                    || (extra.context.is_some()
+                        && extra.context.clone().unwrap().contains("external"))
+                {
+                    continue;
+                }
+                for meta in extra.metadata.as_ref().unwrap().iter() {
+                    // get metadata.
+                    let album_meta = plex.get_metadata(&meta.rating_key).await?;
+                    if album_meta.media_container.metadata.is_none() {
+                        continue;
+                    }
+                    for meta in album_meta.media_container.metadata.as_ref().unwrap().iter() {
+                        metadata.push(meta.clone());
+                    }
+                }
+            }
+            let albums = plex
+                .get_metadata_children(&artist_metadata.rating_key)
+                .await?;
+            if albums.media_container.metadata.is_some() {
+                for album in albums.media_container.metadata.as_ref().unwrap().iter() {
+                    metadata.push(album.clone());
+                }
+            }
+
+            for meta in metadata {
+                //println!("\talbum: {:?} ({})", meta.title, meta.rating_key);
+                let tracks_meta = plex.get_metadata_children(&meta.rating_key).await?;
+                if tracks_meta.media_container.metadata.is_none() {
+                    continue;
+                }
+
+                for track in tracks_meta
+                    .media_container
+                    .metadata
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                {
+                    // track album artist.
                     let track_album_artist = TrackAlbumArtist {
                         track: track.title.to_lowercase().clone(),
                         album: meta.title.to_lowercase().clone(),
-                        artist: track.original_title.as_ref().unwrap().to_lowercase(),
+                        artist: artist.artist.to_lowercase(),
                         metadata: MetadataType::Plex(PlexMetadata {
                             machine_identifier: providers
                                 .media_container
@@ -455,17 +583,41 @@ async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyhow::E
                         }),
                     };
                     tracks.push(track_album_artist);
+                    if track.original_title.is_some() {
+                        // there might be an additional artist, so try to match that too?
+                        let track_album_artist = TrackAlbumArtist {
+                            track: track.title.to_lowercase().clone(),
+                            album: meta.title.to_lowercase().clone(),
+                            artist: track.original_title.as_ref().unwrap().to_lowercase(),
+                            metadata: MetadataType::Plex(PlexMetadata {
+                                machine_identifier: providers
+                                    .media_container
+                                    .machine_identifier
+                                    .clone(),
+                                provider_identifier: providers
+                                    .media_container
+                                    .media_provider
+                                    .get(0)
+                                    .expect("no media provider found")
+                                    .identifier
+                                    .clone(),
+                                rating_key: track.rating_key.clone(),
+                                key: track.key.clone(),
+                            }),
+                        };
+                        tracks.push(track_album_artist);
+                    }
                 }
             }
-        }
 
-        print!(
-            "\rProcessing Plex Artist {} of {}, tracks found: {}               ",
-            i,
-            artists_final.len(),
-            tracks.len()
-        );
-        i += 1;
+            print!(
+                "\rProcessing Plex Artist {} of {}, tracks found: {}               ",
+                i,
+                artists.len(),
+                tracks.len()
+            );
+            i += 1;
+        }
     }
     println!("");
 
