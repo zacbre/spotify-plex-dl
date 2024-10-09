@@ -1,9 +1,12 @@
 # spotify-plex-dl
 All in one software to sync spotify playlist to plex, music included (using spotydl).
 
-To get your plex token, follow this link: [Here](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
-To get your spotify client id and secret, sign up and create an application: [Here](https://developer.spotify.com/dashboard/applications)
-Set the spotify auth callback url to `http://localhost:8888/callback`.
+### Plex
+- To get your plex token, follow this link: [Here](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
+
+### Spotify
+- To get your spotify client id and secret, sign up and create an application: [Here](https://developer.spotify.com/dashboard/applications)
+- Set the spotify auth callback url to `http://localhost:8888/callback`.
 
 ### Usage
 
