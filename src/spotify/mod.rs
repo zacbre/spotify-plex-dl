@@ -1,5 +1,5 @@
 use rspotify::{
-    model::{PlayableItem, PlaylistId},
+    model::{FullArtist, FullTrack, PlayableItem, PlaylistId, SimplifiedArtist},
     prelude::{BaseClient, OAuthClient},
     scopes, AuthCodeSpotify, Credentials, OAuth,
 };
@@ -36,7 +36,11 @@ pub async fn get_spotify_tracks(
                 let track_album_artist = TrackAlbumArtist {
                     track: track.name.to_lowercase().clone(),
                     album: track.album.name.to_lowercase().clone(),
-                    artist: track.artists[0].name.to_lowercase().clone(),
+                    artist: track
+                        .artists
+                        .iter()
+                        .map(|a| a.name.trim().to_lowercase().clone())
+                        .collect(),
                     metadata: MetadataType::Spotify(SpotifyMetadata {
                         uri: track.href.as_ref().unwrap().clone(),
                     }),
@@ -47,7 +51,7 @@ pub async fn get_spotify_tracks(
                 let track_album_artist = TrackAlbumArtist {
                     track: episode.name.to_lowercase().clone(),
                     album: episode.show.name.to_lowercase().clone(),
-                    artist: episode.show.publisher.to_lowercase().clone(),
+                    artist: vec![episode.show.publisher.to_lowercase().clone()],
                     metadata: MetadataType::Spotify(SpotifyMetadata {
                         uri: episode.href.clone(),
                     }),

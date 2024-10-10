@@ -69,17 +69,30 @@ impl Plex {
         Ok(artists)
     }
 
-    pub async fn get_extras(
+    pub async fn get_extra_items(
         &self,
-        key: &str,
-    ) -> Result<MediaContainerWrapper<ExtrasMediaContainer>, anyhow::Error> {
-        let extras: MediaContainerWrapper<ExtrasMediaContainer> = self
-            .get(format!("library/metadata/{}/related?includeAugmentations=1&includeExternalMetadata=1&includeMeta=1", key).as_str())
-            .await?
-            .json()
-            .await?;
-        Ok(extras)
+        section: &String,
+        artist: &String,
+        type_id: i32,
+    ) -> Result<MediaContainerWrapper<MetadataMediaContainer>, anyhow::Error> {
+        //let response = self.get(format!("library/sections/{}/all?format!=EP,Single,Compilation,Live,Soundtrack&artist.id={}&includeMetadata=1&type={}&X-Plex-Container-Start=0&X-Plex-Container-Size=1000", section, artist, type_id).as_str()).await?;
+        //println!("{:?}", response.text().await?);
+        let response = self.get(format!("library/sections/{}/all?format!=EP,Single,Compilation,Live,Soundtrack&artist.id={}&includeMetadata=1&type={}&X-Plex-Container-Start=0&X-Plex-Container-Size=1000", section, artist, type_id).as_str()).await?;
+        let extra_items: MediaContainerWrapper<MetadataMediaContainer> = response.json().await?;
+        Ok(extra_items)
     }
+
+    // pub async fn get_extras(
+    //     &self,
+    //     key: &str,
+    // ) -> Result<MediaContainerWrapper<ExtrasMediaContainer>, anyhow::Error> {
+    //     let extras: MediaContainerWrapper<ExtrasMediaContainer> = self
+    //         .get(format!("library/metadata/{}/related?includeAugmentations=1&includeExternalMetadata=1&includeMeta=1", key).as_str())
+    //         .await?
+    //         .json()
+    //         .await?;
+    //     Ok(extras)
+    // }
 
     pub async fn get_metadata(
         &self,

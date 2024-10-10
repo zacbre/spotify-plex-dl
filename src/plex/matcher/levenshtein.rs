@@ -17,29 +17,52 @@ impl Matcher for LevenshteinDistance {
         spotify_track: &TrackAlbumArtist,
         playlist_name: &String,
     ) -> Result<TrackAlbumArtist, anyhow::Error> {
-        let mut sorted: Vec<(usize, TrackAlbumArtist)> = plex_tracks
+        let mut sorted: Vec<(usize, TrackAlbumArtist, String, String)> = plex_tracks
             .iter()
             .enumerate()
             .map(|(_, f)| {
-                let artist_distance = levenshtein(&spotify_track.artist, &f.artist);
+                // get which one has the lowest distance.
+                let mut distances: Vec<(usize, String, String)> = f
+                    .artist
+                    .iter()
+                    .map(|artist| {
+                        spotify_track.artist.iter().map(|spotify_artist| {
+                            let spotify_artist = spotify_artist.clone();
+                            let artist = artist.clone();
+                            (
+                                levenshtein(&spotify_artist, &artist),
+                                spotify_artist.clone(),
+                                artist.clone(),
+                            )
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                distances.sort_by_key(|(d, _, _)| *d);
+                let (artist_distance, spotify_artist, plex_artist) = distances.get(0).unwrap();
                 let track_distance = levenshtein(&spotify_track.track, &f.track);
-                return (artist_distance + track_distance, f.clone());
+                return (
+                    *artist_distance + track_distance,
+                    f.clone(),
+                    spotify_artist.clone(),
+                    plex_artist.clone(),
+                );
             })
             .collect();
 
-        sorted.sort_by_key(|(distance, _)| *distance);
+        sorted.sort_by_key(|(distance, _, _, _)| *distance);
 
         // get highest score?
-        if let Some((distance, plex_track)) = sorted.get(0) {
-            if *distance < 11 {
+        if let Some((distance, plex_track, spotify_artist, plex_artist)) = sorted.get(0) {
+            if *distance <= 4 {
                 println!(
-                    "Closest match ({}): {:?} {:?} {:?} => {:?} {:?} {:?}",
+                    "Closest match ({}): {} - {} => {} - {}",
                     distance,
-                    spotify_track.artist,
-                    spotify_track.album,
+                    spotify_artist,
+                    //spotify_track.album,
                     spotify_track.track,
-                    plex_track.artist,
-                    plex_track.album,
+                    plex_artist,
+                    //plex_track.album,
                     plex_track.track
                 );
                 playlist(playlist_id, &plex, plex_track, playlist_name).await?;

@@ -29,7 +29,9 @@ impl Matcher for MatchWithCharReplacements {
             .map(|p| {
                 let mut track = p.clone();
                 for (from, to) in replacements.iter() {
-                    track.artist = track.artist.replace(from, to);
+                    for artist in track.artist.iter_mut() {
+                        *artist = artist.replace(from, to);
+                    }
                     track.track = track.track.replace(from, to);
                 }
                 track
@@ -38,7 +40,9 @@ impl Matcher for MatchWithCharReplacements {
 
         let mut spotify_track = spotify_track.clone();
         for (from, to) in replacements.iter() {
-            spotify_track.artist = spotify_track.artist.replace(from, to);
+            for artist in spotify_track.artist.iter_mut() {
+                *artist = artist.replace(from, to);
+            }
             spotify_track.track = spotify_track.track.replace(from, to);
         }
 

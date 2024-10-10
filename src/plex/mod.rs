@@ -51,90 +51,66 @@ pub async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyho
         //println!("artist: {:?}", artist.title);
         // get any additional metadata from artist.
         let mut metadata: Vec<Metadata> = Vec::new();
-        let extras = plex.get_extras(&artist.rating_key).await?;
-        for extra in extras.media_container.hub.iter() {
-            if extra.metadata.is_none()
-                || extra.rtype != "album"
-                || (extra.context.is_some() && extra.context.clone().unwrap().contains("external"))
-            {
-                continue;
-            }
-            for meta in extra.metadata.as_ref().unwrap().iter() {
-                // get metadata.
-                let album_meta = plex.get_metadata(&meta.rating_key).await?;
-                if album_meta.media_container.metadata.is_none() {
-                    continue;
-                }
-                for meta in album_meta.media_container.metadata.as_ref().unwrap().iter() {
-                    metadata.push(meta.clone());
-                }
-            }
-        }
-        let albums = plex.get_metadata_children(&artist.rating_key).await?;
-        if albums.media_container.metadata.is_some() {
-            for album in albums.media_container.metadata.as_ref().unwrap().iter() {
+        let extras = plex
+            .get_extra_items(&provider, &artist.rating_key, 9) // 9 is albums
+            .await?;
+        if extras.media_container.metadata.is_some() {
+            for album in extras.media_container.metadata.as_ref().unwrap().iter() {
                 metadata.push(album.clone());
             }
         }
+        // let albums = plex.get_metadata_children(&artist.rating_key).await?;
+        // if albums.media_container.metadata.is_some() {
+        //     for album in albums.media_container.metadata.as_ref().unwrap().iter() {
+        //         metadata.push(album.clone());
+        //     }
+        // }
 
+        let mut tracks_metadata: Vec<Metadata> = Vec::new();
         for meta in metadata {
             //println!("\talbum: {:?} ({})", meta.title, meta.rating_key);
             let tracks_meta = plex.get_metadata_children(&meta.rating_key).await?;
             if tracks_meta.media_container.metadata.is_none() {
                 continue;
             }
+            for item in tracks_meta.media_container.metadata.unwrap().iter() {
+                tracks_metadata.push(item.clone());
+            }
+        }
 
-            for track in tracks_meta
+        let singles_eps = plex
+            .get_extra_items(&provider, &artist.rating_key, 10) // 10 is tracks
+            .await?;
+
+        if singles_eps.media_container.metadata.is_some() {
+            for track in singles_eps
                 .media_container
                 .metadata
                 .as_ref()
                 .unwrap()
                 .iter()
             {
-                // track album artist.
-                let track_album_artist = TrackAlbumArtist {
-                    track: track.title.to_lowercase().clone(),
-                    album: meta.title.to_lowercase().clone(),
-                    artist: artist.title.to_lowercase(),
-                    metadata: MetadataType::Plex(PlexMetadata {
-                        machine_identifier: providers.media_container.machine_identifier.clone(),
-                        provider_identifier: providers
-                            .media_container
-                            .media_provider
-                            .get(0)
-                            .expect("no media provider found")
-                            .identifier
-                            .clone(),
-                        rating_key: track.rating_key.clone(),
-                        key: track.key.clone(),
-                    }),
-                };
-                tracks.push(track_album_artist);
-                if track.original_title.is_some() {
-                    // there might be an additional artist, so try to match that too?
-                    let track_album_artist = TrackAlbumArtist {
-                        track: track.title.to_lowercase().clone(),
-                        album: meta.title.to_lowercase().clone(),
-                        artist: track.original_title.as_ref().unwrap().to_lowercase(),
-                        metadata: MetadataType::Plex(PlexMetadata {
-                            machine_identifier: providers
-                                .media_container
-                                .machine_identifier
-                                .clone(),
-                            provider_identifier: providers
-                                .media_container
-                                .media_provider
-                                .get(0)
-                                .expect("no media provider found")
-                                .identifier
-                                .clone(),
-                            rating_key: track.rating_key.clone(),
-                            key: track.key.clone(),
-                        }),
-                    };
-                    tracks.push(track_album_artist);
-                }
+                tracks_metadata.push(track.clone());
             }
+        }
+
+        // artist and split that original title.
+
+        for track in tracks_metadata.iter() {
+            let mut artists: Vec<String> = vec![artist.title.trim().to_lowercase()];
+            if track.original_title.is_some() {
+                let extra_artists = track
+                    .original_title
+                    .as_ref()
+                    .unwrap()
+                    .split(&[',', '&', '/'][..])
+                    .map(|s| s.trim().to_lowercase())
+                    .collect::<Vec<String>>();
+                artists.extend(extra_artists);
+            }
+
+            let track_album_artist = get_track_album_artist(track, artists, providers.clone());
+            tracks.push(track_album_artist);
         }
 
         print!(
@@ -148,6 +124,38 @@ pub async fn get_plex_tracks(plex: &Plex) -> Result<Vec<TrackAlbumArtist>, anyho
     println!("");
 
     Ok(tracks)
+}
+
+fn get_track_album_artist(
+    track: &Metadata,
+    artist: Vec<String>,
+    providers: MediaContainerWrapper<ProviderMediaContainer>,
+) -> TrackAlbumArtist {
+    let track_album_artist = TrackAlbumArtist {
+        track: track.title.trim().to_lowercase(),
+        album: track
+            .parent_title
+            .as_ref()
+            .unwrap()
+            .trim()
+            .to_lowercase()
+            .to_string(),
+        artist,
+        metadata: MetadataType::Plex(PlexMetadata {
+            machine_identifier: providers.media_container.machine_identifier.clone(),
+            provider_identifier: providers
+                .media_container
+                .media_provider
+                .get(0)
+                .expect("no media provider found")
+                .identifier
+                .clone(),
+            rating_key: track.rating_key.clone(),
+            key: track.key.clone(),
+        }),
+    };
+
+    track_album_artist
 }
 
 pub(crate) async fn playlist(

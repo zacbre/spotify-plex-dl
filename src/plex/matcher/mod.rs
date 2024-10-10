@@ -1,6 +1,7 @@
 pub mod character_replacement;
 pub mod forward_backward;
 pub mod levenshtein;
+pub mod remove_sections;
 
 use crate::track_album_artist::TrackAlbumArtist;
 

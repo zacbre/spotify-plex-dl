@@ -27,3 +27,4 @@ Cargo.lock
 secrets.env
 .spotify_token_cache.json
 .DS_Store
+*.json

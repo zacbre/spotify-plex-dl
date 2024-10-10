@@ -15,6 +15,7 @@ pub struct Metadata {
     pub key: String,
     pub rating_key: String,
     pub title: String,
+    pub parent_title: Option<String>,
     #[serde(rename = "type")]
     pub rtype: String,
     pub original_title: Option<String>,

@@ -10,7 +10,7 @@ use plex::{
     get_plex_tracks,
     matcher::{
         character_replacement::MatchWithCharReplacements, forward_backward::MatchForwardBack,
-        levenshtein::LevenshteinDistance, Matcher,
+        levenshtein::LevenshteinDistance, remove_sections::RemoveSections, Matcher,
     },
 };
 use spotify::get_spotify_tracks;
@@ -33,6 +33,9 @@ struct Args {
     plex_url: Option<String>,
     #[arg(short = 't', long, required = false)]
     plex_token: Option<String>,
+
+    #[arg(short = 'd', long, required = false)]
+    dump_tracks: bool,
 }
 
 #[tokio::main]
@@ -67,6 +70,14 @@ async fn main() -> Result<(), anyhow::Error> {
         get_spotify_tracks(spotify_client_id, spotify_client_secret, args.playlist_id).await?;
     let plex_tracks = get_plex_tracks(&plex).await?;
 
+    if args.dump_tracks {
+        let file = std::fs::File::create("plex_tracks.json")?;
+        serde_json::to_writer(&file, &plex_tracks)?;
+        let file = std::fs::File::create("spotify_tracks.json")?;
+        serde_json::to_writer(&file, &spotify_tracks)?;
+        return Ok(());
+    }
+
     // try to find a single match?
     find_matches_and_update_playlist(&plex, &spotify_tracks, &plex_tracks, &args.playlist_name)
         .await?;
@@ -87,6 +98,7 @@ async fn find_matches_and_update_playlist(
             Box::new(MatchForwardBack {}),
             Box::new(LevenshteinDistance {}),
             Box::new(MatchWithCharReplacements {}),
+            Box::new(RemoveSections {}),
         ];
 
         for fun in list_of_fns {
@@ -108,21 +120,34 @@ async fn find_matches_and_update_playlist(
                             (spotify_track.clone(), track_result.clone()),
                         );
                     } else {
-                        let matched = dupe_list.get(&meta.rating_key);
+                        let matched = dupe_list.get(&meta.rating_key).unwrap();
                         println!(
-                            "Found a duplicate result: {:?} => {:?} {:?} {:?}",
-                            matched, track_result.artist, track_result.album, track_result.track
+                            "Found a duplicate result: ([{:?} - {}] already matched [{:?} - {}]) => new match: {:?} - {}",
+                            matched.0.artist, matched.0.track, matched.1.artist, matched.1.track, track_result.artist, track_result.track
                         );
                     }
                 }
                 continue 'outer;
             }
         }
-        println!("No match found for {:?}", spotify_track);
+        println!("===================================");
+        println!(
+            "No match found for: {:?} - {}",
+            spotify_track.artist, spotify_track.track
+        );
+        let mut immediate_dupe_list = BTreeMap::new();
         for plex_track in plex_tracks.iter() {
             if plex_track.artist == spotify_track.artist || plex_track.album == spotify_track.album
             {
-                println!("Match from the artist/album: {:?}", plex_track);
+                let key = format!("{:?}{}", plex_track.artist, plex_track.album);
+                if immediate_dupe_list.contains_key(&key) {
+                    continue;
+                }
+                immediate_dupe_list.insert(key, plex_track);
+                println!(
+                    "Match from the artist/album: {:?} - {}",
+                    plex_track.artist, plex_track.track
+                );
             }
         }
         println!("===================================");
